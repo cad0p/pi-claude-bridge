@@ -1,5 +1,9 @@
 # Changelog
 
+## UNRELEASED
+
+- **Fix: session rebuilds re-wrote the whole conversation to the prompt cache** — A rebuild (after an abort, or in a new pi process) dropped the session-start attachments Claude Code wrote after the first prompt (`environment`, `session_context`, `date`, ...), so Claude Code re-attached them to the newest prompt and the rebuilt request no longer matched the cached prefix. They are now carried in place like `@file` attachments, and the pi→CC session link is persisted in `<agentDir>/claude-bridge-sessions.json` so a new process can carry them too. Measured on a 6K-token history: the turn after a rebuild wrote ~800 cache tokens instead of ~14K. Covered by `tests/unit-attachments.mjs` and `tests/unit-session-links.mjs`.
+
 ## 0.9.3 — 2026-10-13
 
 - **Remove: compaction and branch-summary takeovers (#189)** — pi runs them natively; the bridge routes summary calls to its isolated path. Other compaction extensions should now work. Resolves #115. Thanks @sonSunnoi.
