@@ -24,5 +24,6 @@ All notable changes to this project will be documented in this file.
 - Publish the fork as @cad0p/pi-claude-bridge with semver-calver-release (closes #1)
 - Revert CHANGELOG edit (curation happens on the release PR)
 - Publish the fork as @cad0p/pi-claude-bridge with semver-calver-release (closes #1)
+- Require node >=22.19.0, matching pi (closes #3)
 
 
