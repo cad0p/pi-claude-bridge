@@ -8,6 +8,10 @@ All notable changes to this project will be documented in this file.
 <!-- Add your curated release notes here. -->
 <!-- USER-EDITABLE SECTION END -->
 
+### 🐛 Bug Fixes
+
+- Carry Claude Code's own image and oversized tool results across rebuilds (closes #6)
+
 ### 💼 Other
 
 - Fork Claude Code's session when /tree goes back to an earlier turn, instead of rebuilding it
