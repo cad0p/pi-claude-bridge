@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createSession, openSession } from "cc-session-io";
 import { findForkPoint, fingerprint } from "../src/tree-fork.js";
+import { lookupSessionLink } from "../src/session-links.js";
 
 const { __test } = await import("../src/index.js");
 
@@ -165,6 +166,21 @@ describe("syncSharedSession on a trimmed history", () => {
 		assert.equal(__test.getSharedSession(null).forkedFrom, undefined);
 		const records = openSession({ sessionId: result.sessionId, projectPath: cwd }).records;
 		assert.ok(records.some((r) => r.type === "attachment" && r.attachment.filename === "/a.js"), "the source's attachment is carried");
+	});
+
+	// A new pi process carries attachments from the linked session: until CC
+	// writes the fork, that has to stay the source, which exists.
+	it("keeps the session link on the source until CC writes the fork", () => {
+		const { sessionId } = seed();
+		__test.setSharedSession("pi-link", { sessionId, cursor: 4, cwd, needsRebuild: true, synced: history.map(fingerprint) });
+		const forkedId = __test.syncSharedSession(branch, cwd, undefined, undefined, "pi-link", true).fork.sessionId;
+		assert.equal(lookupSessionLink("pi-link", cwd), sessionId);
+		const written = createSession({ sessionId: forkedId, projectPath: cwd });
+		written.importMessages([...branch, assistant("C")].map(({ role, content }) => ({ role, content })));
+		written.save();
+		__test.syncSharedSession([...branch, assistant("C"), user("again")], cwd, undefined, undefined, "pi-link", true);
+		assert.equal(lookupSessionLink("pi-link", cwd), forkedId);
+		__test.resetSharedSession("pi-link");
 	});
 
 	it("keeps a fork CC wrote and resumes it", () => {
