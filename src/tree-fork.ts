@@ -53,6 +53,8 @@ export type ForkPoint = { uuid: string } | { reason: string };
 export function findForkPoint(prior: readonly unknown[], synced: readonly string[], records: readonly JsonlRecord[]): ForkPoint {
 	if (prior.length === 0) return { reason: "empty history" };
 	if (prior.length >= synced.length) return { reason: `history (${prior.length}) is not shorter than the synced one (${synced.length})` };
+	// Fingerprints carry no content, so they only identify messages pi stamped.
+	if (prior.some((m) => (m as Msg).timestamp === undefined)) return { reason: "a kept message has no timestamp" };
 	const diverged = prior.findIndex((m, i) => fingerprint(m) !== synced[i]);
 	if (diverged !== -1) return { reason: `history diverges from the synced one at message ${diverged}` };
 	const last = prior[prior.length - 1] as Msg;

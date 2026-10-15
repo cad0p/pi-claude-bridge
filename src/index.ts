@@ -208,9 +208,10 @@ interface SessionState {
 	// from, which CC's session holds. Lets a history trimmed back to an earlier
 	// turn fork CC's own session instead of rebuilding it.
 	synced?: string[];
-	// Set by a fork until CC confirms it wrote the forked session (the query
-	// completed, or its file holds records): the session it was forked from,
-	// which a rebuild carries attachments from while the fork's file may not exist.
+	// Set by a fork until the next sync finds CC wrote the forked session (its
+	// file holds records): the session it was forked from, which a rebuild
+	// carries attachments from if the fork's file was never written. Not cleared
+	// when the query completes: an error result completes it too.
 	forkedFrom?: { sessionId: string };
 }
 
@@ -803,7 +804,9 @@ function debugSessionPaths(label: string, cwd: string, jsonlPath: string): void 
 			sharedSession = rest;
 		} else {
 			unwrittenForkSource = forkedFrom.sessionId;
-			sharedSession = { ...rest, needsRebuild: true };
+			// Rotate rather than rebuild in place: the fork's CC process may yet
+			// write that id (a reentrant query syncing before it starts writing).
+			sharedSession = { ...rest, needsRebuild: true, forceRotate: true };
 			debug(`fork ${sharedSession.sessionId.slice(0, 8)} was never written; rebuilding with attachments from ${unwrittenForkSource.slice(0, 8)}`);
 		}
 		setSessionStateFor(piSessionId, sharedSession);
@@ -2211,8 +2214,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 					debug(`provider: query done, session=${sessionId.slice(0, 8)}, cursor=${cursor}`);
 					// A missed steer may precede the first mirror or arrive while this
 					// query is still able to complete. Preserve both rebuild signals.
-					// Completing confirms a fork: CC wrote its session.
-					setSessionStateFor(queryCtx.piSessionId, { ...state, sessionId, cursor, cwd, piSessionId: queryCtx.piSessionId ?? undefined, needsRebuild: queryCtx.missedSteer || state?.needsRebuild, forkedFrom: undefined });
+					setSessionStateFor(queryCtx.piSessionId, { ...state, sessionId, cursor, cwd, piSessionId: queryCtx.piSessionId ?? undefined, needsRebuild: queryCtx.missedSteer || state?.needsRebuild });
 				}
 			}
 

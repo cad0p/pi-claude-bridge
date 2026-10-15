@@ -45,6 +45,12 @@ describe("findForkPoint", () => {
 		assert.match(findForkPoint([u1, user("summary of the branch")], synced, records).reason, /diverges/);
 	});
 
+	it("refuses a history holding a message with no timestamp, which a fingerprint cannot identify", () => {
+		const bare = { role: "assistant", content: [{ type: "text", text: "injected" }], stopReason: "stop" };
+		const s = [u1, bare, u2].map(fingerprint);
+		assert.match(findForkPoint([u1, bare], s, records).reason, /no timestamp/);
+	});
+
 	it("refuses a cut in the middle of a turn", () => {
 		const call = assistant("calling", "toolUse");
 		const result = toolResult("t1");
@@ -153,9 +159,11 @@ describe("syncSharedSession on a trimmed history", () => {
 		const forkedId = __test.syncSharedSession(branch, cwd, undefined, undefined, null, true).fork.sessionId;
 		const result = __test.syncSharedSession([...branch, assistant("C"), user("again")], cwd, undefined, undefined, null, true);
 		assert.equal(result.fork, undefined);
-		assert.equal(result.sessionId, forkedId);
+		// A new id: the fork's CC process may still write the old one.
+		assert.notEqual(result.sessionId, forkedId);
+		assert.notEqual(result.sessionId, sessionId);
 		assert.equal(__test.getSharedSession(null).forkedFrom, undefined);
-		const records = openSession({ sessionId: forkedId, projectPath: cwd }).records;
+		const records = openSession({ sessionId: result.sessionId, projectPath: cwd }).records;
 		assert.ok(records.some((r) => r.type === "attachment" && r.attachment.filename === "/a.js"), "the source's attachment is carried");
 	});
 
