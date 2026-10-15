@@ -2,6 +2,8 @@
 
 [![npm version](https://img.shields.io/npm/v/pi-claude-bridge)](https://www.npmjs.com/package/pi-claude-bridge)
 
+> **This is a fork** of [elidickinson/pi-claude-bridge](https://github.com/elidickinson/pi-claude-bridge), published as [`@cad0p/pi-claude-bridge`](https://www.npmjs.com/package/@cad0p/pi-claude-bridge). It carries prompt-cache fixes that are still open upstream: [#206](https://github.com/elidickinson/pi-claude-bridge/pull/206) (fork Claude Code's session on `/tree` back), [#205](https://github.com/elidickinson/pi-claude-bridge/pull/205) (rebuilds keep the cache, includes [#166](https://github.com/elidickinson/pi-claude-bridge/pull/166)) and [#204](https://github.com/elidickinson/pi-claude-bridge/pull/204) (no injected bash timeout). Install with `pi install npm:@cad0p/pi-claude-bridge@next` in place of `npm:pi-claude-bridge`. Once these land upstream, switch back.
+
 Pi extension that integrates Claude Code via the [Agent SDK](https://github.com/anthropics/claude-agent-sdk-typescript). Originally based on [claude-agent-sdk-pi](https://github.com/prateekmedia/claude-agent-sdk-pi) by Prateek Sunal.
 
 1. **Provider** — Use Opus/Sonnet/Haiku as models in pi, with all tool calls flowing through pi's TUI
@@ -27,7 +29,7 @@ Requires pi 0.86.1 or newer.
 
 Use `/model` to select any Claude model in pi-ai's catalog, e.g. `claude-bridge/claude-fable-5-1`, `claude-bridge/claude-opus-5`, or `claude-bridge/claude-haiku-4-5`.
 
-Behind the scenes, pi's tools are bridged to Claude Code but everything works like normal in pi. Bash commands get Claude Code's 120-second default timeout since pi's bash has none. Skills are forwarded to Claude Code's system prompt, and steering mid-turn reaches Claude at the next tool boundary.
+Behind the scenes, pi's tools are bridged to Claude Code but everything works like normal in pi. Tool calls reach pi exactly as the model made them; pi's bash has no default timeout, so use an extension such as `@cad0p/pi-bash-timeout` if you want one. Skills are forwarded to Claude Code's system prompt, and steering mid-turn reaches Claude at the next tool boundary.
 
 The model list comes from pi-ai's Anthropic catalog automatically — when pi-ai adds a new Claude model, it appears in `/model` after updating the package, no bridge update needed. Dated snapshot ids (e.g. `claude-opus-4-5-20251101`) are not shown.
 
@@ -147,7 +149,7 @@ Requires the following in `~/.pi/agent/subagents.json`:
 
 ## Known issues
 
-**A session rebuild re-sends the whole conversation.** The bridge rewrites Claude Code's session from pi's history whenever the two diverge — after an abort, `/compact`, tree navigation, an API error, or on returning to a session — and the next request usually misses the prompt cache for everything past the system prompt. Abort-heavy sessions cost noticeably more.
+**A session rebuild can re-send the conversation.** The bridge rewrites Claude Code's session from pi's history whenever the two diverge: after an abort, `/compact`, tree navigation, an API error, or on returning to a session. After an abort or on returning to a session, the rebuild carries Claude Code's session-start context in place, so the next request still reads the history from the prompt cache (measured: about 800 tokens written instead of the whole history). After `/compact` or tree navigation the history itself changes, so the request misses the cache from the point of change. After an API error the effect has not been measured. Going back to the end of an earlier turn with `/tree` (without a branch summary) does not rebuild: the bridge forks Claude Code's own session at that turn, so the kept turns read from the cache as they would on the Anthropic API.
 
 **Files Claude Code edits are not carried across a rebuild.** The edit itself survives in the history as a tool call and result — what's lost is the post-edit file snapshot. `@file` expansions *are* carried.
 

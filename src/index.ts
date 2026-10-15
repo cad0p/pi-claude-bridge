@@ -5,9 +5,10 @@ import { query, type EffortLevel, type SDKMessage, type SettingSource } from "@a
 import type { Base64ImageSource, ContentBlockParam } from "@anthropic-ai/sdk/resources";
 import { Text } from "@earendil-works/pi-tui";
 import { createSession, deleteSession, openSession, repairToolPairing } from "cc-session-io";
+import { randomUUID } from "crypto";
 import { appendFileSync, mkdirSync, realpathSync, statSync } from "fs";
 import { dirname, join } from "path";
-import { PROVIDER_ID, messageContentToText, convertPiMessages } from "./convert.js";
+import { PROVIDER_ID, messageContentToText, convertPiMessages, matchLiveToolResultKeyOrder } from "./convert.js";
 import { debugLogPath, diagLogPath } from "./log-paths.js";
 import { applyLongContext, buildModels, claudeCodeModelId, type LongContextSettings, resolveModel as _resolveModel } from "./models.js";
 import { MCP_SERVER_NAME, MCP_TOOL_PREFIX, renderSkillsBlock } from "./skills.js";
@@ -23,6 +24,8 @@ import {
 	type PromptCapture,
 } from "./prompt-capture.js";
 import { collectCarriedAttachments, placeCarriedAttachments, type CarriedAttachment } from "./attachments.js";
+import { findForkPoint, fingerprint } from "./tree-fork.js";
+import { recordSessionLink, lookupSessionLink } from "./session-links.js";
 import { createToolServer } from "./mcp-server.js";
 import { buildActionSummary, type ToolCallState } from "./askclaude-ui.js";
 import { askClaudeCallTags, askClaudeToolDescription, buildAskClaudeParams, resolveAskClaudeDefaults, resolveAskClaudeMode, type AskClaudeMode } from "./askclaude-schema.js";
@@ -202,6 +205,15 @@ interface SessionState {
 	// with no query in flight does NOT set this — there's no concurrent CC writer
 	// then, so in-place rebuild (preserve UUID, deleteSession + createSession) is safe.
 	forceRotate?: boolean;
+	// Fingerprints (tree-fork.ts) of the history this session was last synced
+	// from, which CC's session holds. Lets a history trimmed back to an earlier
+	// turn fork CC's own session instead of rebuilding it.
+	synced?: string[];
+	// Set by a fork until the next sync finds CC wrote the forked session (its
+	// file holds records): the session it was forked from, which a rebuild
+	// carries attachments from if the fork's file was never written. Not cleared
+	// when the query completes: an error result completes it too.
+	forkedFrom?: { sessionId: string };
 }
 
 /**
@@ -222,6 +234,25 @@ function readCarriedAttachments(sessionId: string, cwd: string): CarriedAttachme
 		// before this existed, so the failure mode is bounded by the status quo.
 		debug(`WARNING: could not read attachments from session ${sessionId.slice(0, 8)}:`, error);
 		return [];
+	}
+}
+
+/** Whether CC wrote session `sessionId`: its file exists and holds records. */
+function sessionWritten(sessionId: string, cwd: string): boolean {
+	try {
+		return openSession({ sessionId, projectPath: cwd, claudeDir: process.env.CLAUDE_CONFIG_DIR }).records.length > 0;
+	} catch {
+		return false;
+	}
+}
+
+/** Where to fork `state`'s CC session so it holds exactly `prior` (tree-fork.ts). */
+function forkPointFor(state: SessionState, prior: readonly unknown[], cwd: string): ReturnType<typeof findForkPoint> {
+	try {
+		const session = openSession({ sessionId: state.sessionId, projectPath: cwd, claudeDir: process.env.CLAUDE_CONFIG_DIR });
+		return findForkPoint(prior, state.synced ?? [], session.records);
+	} catch (error) {
+		return { reason: `could not read session ${state.sessionId.slice(0, 8)}: ${(error as Error).message}` };
 	}
 }
 
@@ -251,7 +282,12 @@ function sessionStateFor(piSessionId: string | null | undefined): SessionState |
 /** Replace (or plant) the mirror for `piSessionId`. */
 function setSessionStateFor(piSessionId: string | null | undefined, state: SessionState | null): void {
 	if (state === null) sharedSessions.delete(sessionKey(piSessionId));
-	else sharedSessions.set(sessionKey(piSessionId), state);
+	else {
+		sharedSessions.set(sessionKey(piSessionId), state);
+		// Persisted so a NEW process can still carry attachments (session-links.ts).
+		// A pending fork may never be written: keep the link on its source until then.
+		recordSessionLink(piSessionId, state.forkedFrom?.sessionId ?? state.sessionId, state.cwd);
+	}
 }
 
 // pi replaced one of its sessions' history (compact, tree) rather than appending
@@ -380,6 +416,7 @@ function convertAndImportMessages(
 	}
 	if (repaired.length) {
 		session.importMessages(repaired, placed?.attachments.length ? { attachments: placed.attachments } : undefined);
+		matchLiveToolResultKeyOrder(session.records);
 	}
 }
 
@@ -668,6 +705,9 @@ async function runIsolatedSummary(
 interface SyncResult {
 	sessionId: string | null;
 	preserveSharedSession?: boolean;
+	// Resume `sessionId` only up to this chain entry, forked into a new session
+	// with this id (tree-fork.ts).
+	fork?: { at: string; sessionId: string };
 }
 
 /**
@@ -752,6 +792,7 @@ function debugSessionPaths(label: string, cwd: string, jsonlPath: string): void 
 	customToolNameToSdk?: Map<string, string>,
 	modelId?: string,
 	piSessionId?: string | null,
+	allowFork = false,
 ): SyncResult {
 	// System messages are pi's transcript representation of prompt and tool state, not
 	// conversation history — they are never imported into a CC session, so exclude them from
@@ -760,7 +801,23 @@ function debugSessionPaths(label: string, cwd: string, jsonlPath: string): void 
 	// every read and write below addresses sessionStateFor(piSessionId), so a
 	// foreign session's shape-matching context can never REUSE or rebuild another
 	// session's CC file.
-	const sharedSession = sessionStateFor(piSessionId);
+	let sharedSession = sessionStateFor(piSessionId);
+	// A fork CC never confirmed (its query failed before completing) may have no
+	// file to resume: if so, rebuild, carrying attachments from the source session.
+	let unwrittenForkSource: string | undefined;
+	if (sharedSession?.forkedFrom) {
+		const { forkedFrom, ...rest } = sharedSession;
+		if (sessionWritten(sharedSession.sessionId, cwd)) {
+			sharedSession = rest;
+		} else {
+			unwrittenForkSource = forkedFrom.sessionId;
+			// Rotate rather than rebuild in place: the fork's CC process may yet
+			// write that id (a reentrant query syncing before it starts writing).
+			sharedSession = { ...rest, needsRebuild: true, forceRotate: true };
+			debug(`fork ${sharedSession.sessionId.slice(0, 8)} was never written; rebuilding with attachments from ${unwrittenForkSource.slice(0, 8)}`);
+		}
+		setSessionStateFor(piSessionId, sharedSession);
+	}
 	const history = nonSystemMessages(messages);
 	const priorMessages = history.slice(0, turnStart(history)); // everything before the current user turn
 
@@ -776,10 +833,12 @@ function debugSessionPaths(label: string, cwd: string, jsonlPath: string): void 
 		const trailingAssistantOnly =
 			missed.length === 1 && (missed[0] as { role?: string }).role === "assistant";
 		if (missed.length === 0 || trailingAssistantOnly) {
+		const synced = history.map(fingerprint);
 		if (trailingAssistantOnly) {
-			setSessionStateFor(piSessionId, { ...sharedSession, cursor: priorMessages.length, cwd });
+			setSessionStateFor(piSessionId, { ...sharedSession, cursor: priorMessages.length, cwd, synced });
 			debug(`Case 3: advanced cursor past trailing assistant, resuming session ${sharedSession.sessionId.slice(0, 8)}, cursor=${priorMessages.length}`);
 		} else {
+			setSessionStateFor(piSessionId, { ...sharedSession, synced });
 			debug(`Case 3: resuming session ${sharedSession.sessionId.slice(0, 8)}, cursor=${sharedSession.cursor}`);
 		}
 		debug(`syncResult: path=reuse sessionId=${sharedSession.sessionId} cursor=${sharedSession?.cursor}`);
@@ -814,6 +873,23 @@ function debugSessionPaths(label: string, cwd: string, jsonlPath: string): void 
 		debug(`syncResult: path=clean-start`);
 		return { sessionId: null };
 	}
+	// FORK path: pi's history went back to an earlier turn of this session.
+	// Not after an abort (forceRotate): the killed process may still be writing.
+	if (allowFork && sharedSession?.needsRebuild && !sharedSession.forceRotate && sharedSession.synced) {
+		const fork = forkPointFor(sharedSession, priorMessages, cwd);
+		if ("uuid" in fork) {
+			const forkedId = randomUUID();
+			setSessionStateFor(piSessionId, {
+				sessionId: forkedId, cursor: priorMessages.length, cwd, piSessionId: piSessionId ?? undefined,
+				synced: history.map(fingerprint), forkedFrom: { sessionId: sharedSession.sessionId },
+			});
+			debug(`Case 5: history trimmed to ${priorMessages.length} msgs → forking session ${sharedSession.sessionId.slice(0, 8)} at ${fork.uuid.slice(0, 8)} into ${forkedId.slice(0, 8)}`);
+			debug(`syncResult: path=fork sessionId=${sharedSession.sessionId} at=${fork.uuid} into=${forkedId}`);
+			return { sessionId: sharedSession.sessionId, fork: { at: fork.uuid, sessionId: forkedId } };
+		}
+		debug(`Case 5: not forking, rebuilding instead: ${fork.reason}`);
+	}
+
 	const previousSessionId = sharedSession?.sessionId;
 	const previousCursor = sharedSession?.cursor ?? 0;
 	// preserveId: rebuild in place (deleteSession + createSession with the
@@ -822,7 +898,15 @@ function debugSessionPaths(label: string, cwd: string, jsonlPath: string): void 
 	// writer we shouldn't race (forceRotate).
 	const preserveId = previousSessionId !== undefined && !sharedSession?.forceRotate;
 	// Before deleteSession — it wipes the file these live in.
-	const carried = previousSessionId !== undefined ? readCarriedAttachments(previousSessionId, cwd) : [];
+	// With no in-process mirror (a new pi process), fall back to the CC session this
+	// pi session last ran on, persisted by session-links.ts. Read-only: it is never
+	// deleted or resumed here, only read for attachments to carry.
+	const linkedSessionId = previousSessionId === undefined ? lookupSessionLink(piSessionId, cwd) : undefined;
+	const carrySource = unwrittenForkSource ?? previousSessionId ?? linkedSessionId;
+	const carried = carrySource !== undefined ? readCarriedAttachments(carrySource, cwd) : [];
+	if (linkedSessionId !== undefined) {
+		debug(`Case 2: carrying ${carried.length} attachment(s) from linked session ${linkedSessionId.slice(0, 8)} (new process)`);
+	}
 	if (preserveId) {
 		// Wipe prior jsonl + companion dir (no-op if nothing to wipe).
 		deleteSession(previousSessionId!, cwd, process.env.CLAUDE_CONFIG_DIR);
@@ -838,7 +922,7 @@ function debugSessionPaths(label: string, cwd: string, jsonlPath: string): void 
 	// records, not messages: `messages` filters out the attachment records that
 	// carrying an `@file` expansion across a rebuild writes into the same file.
 	verifyWrittenSession(session.jsonlPath, session.sessionId, session.records.length, cwd);
-	setSessionStateFor(piSessionId, { sessionId: session.sessionId, cursor: priorMessages.length, cwd, piSessionId: piSessionId ?? undefined });
+	setSessionStateFor(piSessionId, { sessionId: session.sessionId, cursor: priorMessages.length, cwd, piSessionId: piSessionId ?? undefined, synced: history.map(fingerprint) });
 	if (previousSessionId === undefined) {
 		debug(`Case 2: first turn with ${priorMessages.length} prior messages → session ${session.sessionId.slice(0, 8)}, ${session.records.length} records`);
 	} else if (preserveId) {
@@ -946,10 +1030,10 @@ function mapToolArgs(
 		const piKey = renames?.[key] ?? key;
 		if (!(piKey in result)) result[piKey] = value; // first alias wins
 	}
-	// Pi bash has no default timeout; add a safety default
-	if (toolName.toLowerCase() === "bash" && result.timeout == null) {
-		result.timeout = 120;
-	}
+	// No default bash timeout: an argument the model did not send would reach
+	// pi's history but not Claude Code's, and every rebuild would then miss the
+	// prompt cache from the first such call. A default belongs in pi's bash tool
+	// itself (e.g. an extension that applies one at execution time).
 	return result;
 }
 
@@ -1953,7 +2037,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// Read before the consume below: with no query parked (an overflow retried
 	// after compaction), the session's mark is the only sign of the rewrite.
 	const historyRewritten = rewrittenUnderQuery || (piSessionId !== null && historyRewrittenBySession.has(piSessionId));
-	const syncResult = syncSharedSession(context.messages, cwd, customToolNameToSdk, cliModel, piSessionId);
+	const syncResult = syncSharedSession(context.messages, cwd, customToolNameToSdk, cliModel, piSessionId, true);
 	// This query starts from the history pi has now: consume this session's
 	// armed rewrite — a sibling pi session's stays armed for its own queries.
 	if (piSessionId) historyRewrittenBySession.delete(piSessionId);
@@ -2057,6 +2141,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 		...(effort ? { effort } : {}),
 		...(mcpServers ? { mcpServers } : {}),
 		...(resumeSessionId ? { resume: resumeSessionId } : {}),
+		...(syncResult.fork ? { resumeSessionAt: syncResult.fork.at, forkSession: true, sessionId: syncResult.fork.sessionId } : {}),
 		...(claudeExecutable ? { pathToClaudeCodeExecutable: claudeExecutable } : {}),
 		...makeCliDebugOptions("provider"),
 	};
