@@ -29,14 +29,13 @@ export function fingerprint(message: unknown): string {
 	return `${m.role}:${m.timestamp ?? ""}:${m.toolCallId ?? ""}`;
 }
 
-/** Prompt records in CC's session, in order: user records holding text rather
- *  than tool results, on the main chain. */
+/** Prompt records in CC's session, in order: user records on the main chain
+ *  other than tool results, with or without text (an image-only prompt counts). */
 function promptRecords(records: readonly JsonlRecord[]): Rec[] {
 	return (records as readonly Rec[]).filter((r) => {
 		if (r.type !== "user" || r.isSidechain || r.isMeta) return false;
 		const content = (r.message as Rec | undefined)?.content;
-		if (Array.isArray(content) && content.some((b) => (b as Rec)?.type === "tool_result")) return false;
-		return Boolean(messageContentToText(content as never));
+		return !(Array.isArray(content) && content.some((b) => (b as Rec)?.type === "tool_result"));
 	});
 }
 
@@ -61,8 +60,12 @@ export function findForkPoint(prior: readonly unknown[], synced: readonly string
 	if (!synced[prior.length].startsWith("user:")) return { reason: "the first dropped message is not a prompt" };
 
 	const piPrompts = (prior as Msg[]).filter((m) => m.role === "user");
+	// CC's session must hold exactly the synced prompts: one it holds that pi
+	// does not (a steer, an AskClaude call, a bridge continue prompt) would shift
+	// every prompt after it, and the cut with them.
 	const ccPrompts = promptRecords(records);
-	if (ccPrompts.length <= piPrompts.length) return { reason: `CC's session has ${ccPrompts.length} prompts, need more than ${piPrompts.length}` };
+	const syncedPrompts = synced.filter((f) => f.startsWith("user:")).length;
+	if (ccPrompts.length !== syncedPrompts) return { reason: `CC's session has ${ccPrompts.length} prompts, the synced history ${syncedPrompts}` };
 	for (const [i, m] of piPrompts.entries()) {
 		const ccText = messageContentToText((ccPrompts[i].message as Rec).content as never);
 		if (ccText !== messageContentToText(m.content as never)) return { reason: `prompt ${i} differs from CC's record of it` };

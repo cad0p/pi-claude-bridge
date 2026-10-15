@@ -208,6 +208,10 @@ interface SessionState {
 	// from, which CC's session holds. Lets a history trimmed back to an earlier
 	// turn fork CC's own session instead of rebuilding it.
 	synced?: string[];
+	// Set by a fork until CC confirms it wrote the forked session (the query
+	// completed, or its file holds records): the session it was forked from,
+	// which a rebuild carries attachments from while the fork's file may not exist.
+	forkedFrom?: { sessionId: string };
 }
 
 /**
@@ -228,6 +232,15 @@ function readCarriedAttachments(sessionId: string, cwd: string): CarriedAttachme
 		// before this existed, so the failure mode is bounded by the status quo.
 		debug(`WARNING: could not read attachments from session ${sessionId.slice(0, 8)}:`, error);
 		return [];
+	}
+}
+
+/** Whether CC wrote session `sessionId`: its file exists and holds records. */
+function sessionWritten(sessionId: string, cwd: string): boolean {
+	try {
+		return openSession({ sessionId, projectPath: cwd, claudeDir: process.env.CLAUDE_CONFIG_DIR }).records.length > 0;
+	} catch {
+		return false;
 	}
 }
 
@@ -780,7 +793,21 @@ function debugSessionPaths(label: string, cwd: string, jsonlPath: string): void 
 	// every read and write below addresses sessionStateFor(piSessionId), so a
 	// foreign session's shape-matching context can never REUSE or rebuild another
 	// session's CC file.
-	const sharedSession = sessionStateFor(piSessionId);
+	let sharedSession = sessionStateFor(piSessionId);
+	// A fork CC never confirmed (its query failed before completing) may have no
+	// file to resume: if so, rebuild, carrying attachments from the source session.
+	let unwrittenForkSource: string | undefined;
+	if (sharedSession?.forkedFrom) {
+		const { forkedFrom, ...rest } = sharedSession;
+		if (sessionWritten(sharedSession.sessionId, cwd)) {
+			sharedSession = rest;
+		} else {
+			unwrittenForkSource = forkedFrom.sessionId;
+			sharedSession = { ...rest, needsRebuild: true };
+			debug(`fork ${sharedSession.sessionId.slice(0, 8)} was never written; rebuilding with attachments from ${unwrittenForkSource.slice(0, 8)}`);
+		}
+		setSessionStateFor(piSessionId, sharedSession);
+	}
 	const history = nonSystemMessages(messages);
 	const priorMessages = history.slice(0, turnStart(history)); // everything before the current user turn
 
@@ -844,7 +871,7 @@ function debugSessionPaths(label: string, cwd: string, jsonlPath: string): void 
 			const forkedId = randomUUID();
 			setSessionStateFor(piSessionId, {
 				sessionId: forkedId, cursor: priorMessages.length, cwd, piSessionId: piSessionId ?? undefined,
-				synced: history.map(fingerprint),
+				synced: history.map(fingerprint), forkedFrom: { sessionId: sharedSession.sessionId },
 			});
 			debug(`Case 5: history trimmed to ${priorMessages.length} msgs → forking session ${sharedSession.sessionId.slice(0, 8)} at ${fork.uuid.slice(0, 8)} into ${forkedId.slice(0, 8)}`);
 			debug(`syncResult: path=fork sessionId=${sharedSession.sessionId} at=${fork.uuid} into=${forkedId}`);
@@ -861,7 +888,8 @@ function debugSessionPaths(label: string, cwd: string, jsonlPath: string): void 
 	// writer we shouldn't race (forceRotate).
 	const preserveId = previousSessionId !== undefined && !sharedSession?.forceRotate;
 	// Before deleteSession — it wipes the file these live in.
-	const carried = previousSessionId !== undefined ? readCarriedAttachments(previousSessionId, cwd) : [];
+	const carrySource = unwrittenForkSource ?? previousSessionId;
+	const carried = carrySource !== undefined ? readCarriedAttachments(carrySource, cwd) : [];
 	if (preserveId) {
 		// Wipe prior jsonl + companion dir (no-op if nothing to wipe).
 		deleteSession(previousSessionId!, cwd, process.env.CLAUDE_CONFIG_DIR);
@@ -2183,7 +2211,8 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 					debug(`provider: query done, session=${sessionId.slice(0, 8)}, cursor=${cursor}`);
 					// A missed steer may precede the first mirror or arrive while this
 					// query is still able to complete. Preserve both rebuild signals.
-					setSessionStateFor(queryCtx.piSessionId, { ...state, sessionId, cursor, cwd, piSessionId: queryCtx.piSessionId ?? undefined, needsRebuild: queryCtx.missedSteer || state?.needsRebuild });
+					// Completing confirms a fork: CC wrote its session.
+					setSessionStateFor(queryCtx.piSessionId, { ...state, sessionId, cursor, cwd, piSessionId: queryCtx.piSessionId ?? undefined, needsRebuild: queryCtx.missedSteer || state?.needsRebuild, forkedFrom: undefined });
 				}
 			}
 
