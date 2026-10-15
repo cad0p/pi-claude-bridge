@@ -7,7 +7,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { createSession, deleteSession, openSession, repairToolPairing } from "cc-session-io";
 import { appendFileSync, mkdirSync, realpathSync, statSync } from "fs";
 import { dirname, join } from "path";
-import { PROVIDER_ID, messageContentToText, convertPiMessages } from "./convert.js";
+import { PROVIDER_ID, messageContentToText, convertPiMessages, matchLiveToolResultKeyOrder } from "./convert.js";
 import { debugLogPath, diagLogPath } from "./log-paths.js";
 import { applyLongContext, buildModels, claudeCodeModelId, type LongContextSettings, resolveModel as _resolveModel } from "./models.js";
 import { MCP_SERVER_NAME, MCP_TOOL_PREFIX, renderSkillsBlock } from "./skills.js";
@@ -385,6 +385,7 @@ function convertAndImportMessages(
 	}
 	if (repaired.length) {
 		session.importMessages(repaired, placed?.attachments.length ? { attachments: placed.attachments } : undefined);
+		matchLiveToolResultKeyOrder(session.records);
 	}
 }
 
