@@ -185,7 +185,9 @@ for (let i = 1; i <= RUNS; i++) {
 	console.log(`  ${r.requests} main-loop requests${r.failedRequests ? `, ${r.failedRequests} non-200 (retried)` : ""}`);
 	console.log(`  [P4] sync path: ${r.path}`);
 	console.log(`  [P4] abandoned turns in the request: ${r.leaked.length ? `${r.leaked.join(", ")}  <<< WRONG HISTORY` : "none"}`);
-	console.log(`  [P4] cacheRead ${r.cacheRead}, cacheWrite ${r.cacheWrite}, best available ${r.expected}, shortfall ${r.shortfall}`);
+	console.log(`  [P4] cacheRead ${r.cacheRead}, cacheWrite ${r.cacheWrite}, ${r.expected
+		? `best available ${r.expected}, shortfall ${r.shortfall}`
+		: "no earlier request is repeated whole: this run rewrote the history's start"}`);
 	for (const e of r.earlier) {
 		const how = e.whole ? "whole prompt repeated" : `repeats ${e.shared} elements, diverges at ${e.divergence.label}`;
 		console.log(`    #${String(e.n).padEnd(3)} cached ${String(e.cached ?? "?").padStart(6)}  ${how}`);
