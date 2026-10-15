@@ -74,10 +74,11 @@ export function messageContentToText(
 // *native* tools' results, made every rebuilt request diverge from the cached
 // prefix at the first tool result (diag/probe-rebuild-fidelity.mjs).
 //
-// Two shapes CC writes cannot be reproduced from pi's history, so a rebuild still
-// diverges at them: an image result, to which CC appends an `[Image: source: …]`
-// block naming a file in its session directory, and an oversized result, which CC
-// replaces with a `<persisted-output>` preview of a file it saved (issue #156).
+// Some shapes CC writes cannot be reproduced from pi's history: an image result,
+// to which CC appends an `[Image: source: …]` block naming a file in its session
+// directory, and an oversized result, which CC replaces with a notice naming a file
+// it saved (issue #156). The rebuild carries those from CC's previous session
+// instead (tool-result-carry.ts).
 function toolResultContent(
 	content: string | Array<{ type: string; text?: string; data?: string; mimeType?: string }>,
 ): Array<Record<string, unknown>> {

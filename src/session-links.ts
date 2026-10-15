@@ -2,7 +2,7 @@
 //
 // The bridge's pi-session → CC-session mirror (sharedSessions in index.ts) is
 // process-local. A new pi process (restart, `pi --continue`, `pi -p` per turn)
-// therefore rebuilds with no previous session id, so readCarriedAttachments has
+// therefore rebuilds with no previous session id, so readCarried has
 // nothing to read: the session-start context CC wrote after the first prompt
 // (environment, session_context, date, ...) is lost, CC re-attaches it to the
 // NEWEST prompt, and the whole history misses the prompt cache.

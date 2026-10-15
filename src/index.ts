@@ -5,7 +5,7 @@ import { query, type EffortLevel, type SDKMessage, type SettingSource } from "@a
 import type { Base64ImageSource, ContentBlockParam } from "@anthropic-ai/sdk/resources";
 import { Text } from "@earendil-works/pi-tui";
 import { createSession, deleteSession, openSession, repairToolPairing } from "cc-session-io";
-import { appendFileSync, mkdirSync, realpathSync, statSync } from "fs";
+import { appendFileSync, lstatSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync } from "fs";
 import { dirname, join } from "path";
 import { PROVIDER_ID, messageContentToText, convertPiMessages, matchLiveToolResultKeyOrder } from "./convert.js";
 import { debugLogPath, diagLogPath } from "./log-paths.js";
@@ -23,6 +23,7 @@ import {
 	type PromptCapture,
 } from "./prompt-capture.js";
 import { collectCarriedAttachments, placeCarriedAttachments, type CarriedAttachment } from "./attachments.js";
+import { applyCarriedToolResults, collectCarriedToolResults, type CarriedToolResult } from "./tool-result-carry.js";
 import { recordSessionLink, lookupSessionLink } from "./session-links.js";
 import { createToolServer } from "./mcp-server.js";
 import { buildActionSummary, type ToolCallState } from "./askclaude-ui.js";
@@ -205,16 +206,20 @@ interface SessionState {
 	forceRotate?: boolean;
 }
 
+/** What a rebuild carries over from the session it replaces. */
+type Carried = { attachments: CarriedAttachment[]; toolResults: Map<string, CarriedToolResult> };
+
 /**
- * Claude Code's `@file` expansions from the session about to be replaced.
+ * Claude Code's `@file` expansions and its own tool_result content from the
+ * session about to be replaced.
  *
  * Must be called before `deleteSession`, which wipes the file they live in —
  * reading after it yields nothing, with no error to notice.
  */
-function readCarriedAttachments(sessionId: string, cwd: string): CarriedAttachment[] {
+function readCarried(sessionId: string, cwd: string): Carried {
+	let previous: ReturnType<typeof openSession>;
 	try {
-		const previous = openSession({ sessionId, projectPath: cwd, claudeDir: process.env.CLAUDE_CONFIG_DIR });
-		return collectCarriedAttachments(previous.records);
+		previous = openSession({ sessionId, projectPath: cwd, claudeDir: process.env.CLAUDE_CONFIG_DIR });
 	} catch (error) {
 		// A post-abort rebuild reads a file the killed CC subprocess may have been
 		// midway through writing, and cc-session-io parses each line with a bare
@@ -222,7 +227,43 @@ function readCarriedAttachments(sessionId: string, cwd: string): CarriedAttachme
 		// lost attachment into a failed turn; carrying none is exactly what happened
 		// before this existed, so the failure mode is bounded by the status quo.
 		debug(`WARNING: could not read attachments from session ${sessionId.slice(0, 8)}:`, error);
-		return [];
+		return { attachments: [], toolResults: new Map() };
+	}
+	// Each separately, so one failing still carries the other.
+	let attachments: CarriedAttachment[] = [];
+	try {
+		attachments = collectCarriedAttachments(previous.records);
+	} catch (error) {
+		debug(`WARNING: could not read attachments from session ${sessionId.slice(0, 8)}:`, error);
+	}
+	let toolResults = new Map<string, CarriedToolResult>();
+	try {
+		toolResults = collectCarriedToolResults(previous.records, dirname(previous.jsonlPath));
+	} catch (error) {
+		debug(`WARNING: could not read tool results from session ${sessionId.slice(0, 8)}:`, error);
+	}
+	return { attachments, toolResults };
+}
+
+/**
+ * `deleteSession`, minus the session's `tool-results` dir. Claude Code saves
+ * oversized outputs and image copies there and names them in the tool_result it
+ * sends; a carried result still names them, and the rebuild reuses the session id,
+ * so the same paths stay valid.
+ */
+function deleteSessionKeepingToolResults(jsonlPath: string): void {
+	rmSync(jsonlPath, { force: true });
+	const companion = jsonlPath.replace(/\.jsonl$/, "");
+	const stat = lstatSync(companion, { throwIfNoEntry: false });
+	if (!stat) return;
+	// Not a real dir (a symlink, a stray file): remove the entry itself, as
+	// deleteSession does, rather than reach through it.
+	if (!stat.isDirectory()) {
+		rmSync(companion, { force: true });
+		return;
+	}
+	for (const entry of readdirSync(companion)) {
+		if (entry !== "tool-results") rmSync(join(companion, entry), { recursive: true, force: true });
 	}
 }
 
@@ -341,7 +382,7 @@ function convertAndImportMessages(
 	session: ReturnType<typeof createSession>,
 	messages: Context["messages"],
 	customToolNameToSdk?: Map<string, string>,
-	carried?: readonly CarriedAttachment[],
+	carried?: Carried,
 ): void {
 	const { anthropicMessages, sanitizedIds, dropped } = convertPiMessages(messages, customToolNameToSdk);
 
@@ -374,14 +415,19 @@ function convertAndImportMessages(
 	// Placement runs against the repaired array because that is the index space
 	// importMessages reads. Attachments are links in CC's uuid chain, so they have
 	// to be written in order with the messages, not appended afterwards.
-	const placed = carried?.length
-		? placeCarriedAttachments(carried, repaired as unknown as { role: string; content: unknown }[])
+	const placed = carried?.attachments.length
+		? placeCarriedAttachments(carried.attachments, repaired as unknown as { role: string; content: unknown }[])
 		: undefined;
 	if (placed?.skipped.length) {
 		debug(`convertAndImportMessages: dropped ${placed.skipped.length} carried attachment(s): ${placed.skipped.join("; ")}`);
 	}
 	if (placed?.attachments.length) {
 		debug(`convertAndImportMessages: carrying ${placed.attachments.length} attachment(s) across the rebuild`);
+	}
+	// Content, not position: replacing it leaves the indices placement used intact.
+	if (carried?.toolResults.size) {
+		const replaced = applyCarriedToolResults(repaired as unknown as { role: string; content: unknown }[], carried.toolResults);
+		if (replaced.length) debug(`convertAndImportMessages: carrying Claude Code's content for ${replaced.length} tool result(s): ${replaced.join(", ")}`);
 	}
 	if (repaired.length) {
 		session.importMessages(repaired, placed?.attachments.length ? { attachments: placed.attachments } : undefined);
@@ -833,13 +879,9 @@ function debugSessionPaths(label: string, cwd: string, jsonlPath: string): void 
 	// deleted or resumed here, only read for attachments to carry.
 	const linkedSessionId = previousSessionId === undefined ? lookupSessionLink(piSessionId, cwd) : undefined;
 	const carrySource = previousSessionId ?? linkedSessionId;
-	const carried = carrySource !== undefined ? readCarriedAttachments(carrySource, cwd) : [];
+	const carried: Carried = carrySource !== undefined ? readCarried(carrySource, cwd) : { attachments: [], toolResults: new Map() };
 	if (linkedSessionId !== undefined) {
-		debug(`Case 2: carrying ${carried.length} attachment(s) from linked session ${linkedSessionId.slice(0, 8)} (new process)`);
-	}
-	if (preserveId) {
-		// Wipe prior jsonl + companion dir (no-op if nothing to wipe).
-		deleteSession(previousSessionId!, cwd, process.env.CLAUDE_CONFIG_DIR);
+		debug(`Case 2: carrying ${carried.attachments.length} attachment(s), ${carried.toolResults.size} tool result(s) from linked session ${linkedSessionId.slice(0, 8)} (new process)`);
 	}
 	const session = createSession({
 		projectPath: cwd,
@@ -847,6 +889,11 @@ function debugSessionPaths(label: string, cwd: string, jsonlPath: string): void 
 		...(preserveId ? { sessionId: previousSessionId } : {}),
 		...(modelId ? { model: modelId } : {}),
 	});
+	if (preserveId) {
+		// Wipe prior jsonl + companion dir (no-op if nothing to wipe), except the
+		// tool-results carried notices point into.
+		deleteSessionKeepingToolResults(session.jsonlPath);
+	}
 	convertAndImportMessages(session, priorMessages, customToolNameToSdk, carried);
 	session.save();
 	// records, not messages: `messages` filters out the attachment records that
@@ -903,6 +950,7 @@ export const __test = {
 	isolatedStreamFn,
 	effortForReasoning,
 	syncSharedSession,
+	deleteSessionKeepingToolResults,
 	extractUserPromptBlocks,
 	consumeQuery,
 	finalizeCurrentStream,
