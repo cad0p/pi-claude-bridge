@@ -2,6 +2,8 @@
 
 [![npm version](https://img.shields.io/npm/v/pi-claude-bridge)](https://www.npmjs.com/package/pi-claude-bridge)
 
+> **This is a fork** of [elidickinson/pi-claude-bridge](https://github.com/elidickinson/pi-claude-bridge), published as [`@cad0p/pi-claude-bridge`](https://www.npmjs.com/package/@cad0p/pi-claude-bridge). It carries prompt-cache fixes that are still open upstream: [#206](https://github.com/elidickinson/pi-claude-bridge/pull/206) (fork Claude Code's session on `/tree` back), [#205](https://github.com/elidickinson/pi-claude-bridge/pull/205) (rebuilds keep the cache, includes [#166](https://github.com/elidickinson/pi-claude-bridge/pull/166)) and [#204](https://github.com/elidickinson/pi-claude-bridge/pull/204) (no injected bash timeout). Install with `pi install npm:@cad0p/pi-claude-bridge@next` in place of `npm:pi-claude-bridge`. Once these land upstream, switch back.
+
 Pi extension that integrates Claude Code via the [Agent SDK](https://github.com/anthropics/claude-agent-sdk-typescript). Originally based on [claude-agent-sdk-pi](https://github.com/prateekmedia/claude-agent-sdk-pi) by Prateek Sunal.
 
 1. **Provider** — Use Opus/Sonnet/Haiku as models in pi, with all tool calls flowing through pi's TUI

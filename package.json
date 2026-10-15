@@ -1,5 +1,5 @@
 {
-  "name": "pi-claude-bridge",
+  "name": "@cad0p/pi-claude-bridge",
   "version": "0.9.3",
   "private": false,
   "description": "Pi extension that uses Claude Code (via Agent SDK) as a model provider and adds an AskClaude tool.",
@@ -14,7 +14,15 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/elidickinson/pi-claude-bridge.git"
+    "url": "git+https://github.com/cad0p/pi-claude-bridge.git"
+  },
+  "homepage": "https://github.com/cad0p/pi-claude-bridge#readme",
+  "bugs": {
+    "url": "https://github.com/cad0p/pi-claude-bridge/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
   },
   "engines": {
     "node": ">=20"
