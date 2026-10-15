@@ -358,7 +358,9 @@ describe("message structure", () => {
 		assert.deepEqual(convert(msgs)[0].content[0].content, [{ type: "text", text: "just text" }]);
 	});
 
-	it("toolResult keeps markers for blocks that are neither text nor image", () => {
+	// The live path sends a tool's blocks through toolResultToMcpContent, which keeps
+	// only non-empty text and images; CC never saw anything else, so neither may a rebuild.
+	it("toolResult drops blocks that are neither text nor image, as the live path does", () => {
 		const msgs = [
 			{ role: "toolResult", toolCallId: "x", content: [
 				{ type: "document" },
@@ -367,9 +369,21 @@ describe("message structure", () => {
 		];
 		const result = convert(msgs)[0].content[0].content;
 		assert.deepEqual(result, [
-			{ type: "text", text: "[document]" },
 			{ type: "image", source: { type: "base64", media_type: "image/png", data: "BASE64DATA" } },
 		]);
+	});
+
+	// Measured live: an MCP tool returning one empty text block is recorded by CC as
+	// this string, naming the tool the way its tool_use did.
+	it("an empty toolResult becomes the note CC writes, naming the MCP tool", () => {
+		const msgs = [
+			{ role: "assistant", content: [{ type: "toolCall", id: "t1", name: "empty_tool", arguments: {} }] },
+			{ role: "toolResult", toolCallId: "t1", toolName: "empty_tool", content: [{ type: "text", text: "" }] },
+		];
+		const served = new Map([["empty_tool", "mcp__custom-tools__empty_tool"]]);
+		const [call, result] = convertPiMessages(msgs, served).anthropicMessages;
+		assert.equal(call.content[0].name, "mcp__custom-tools__empty_tool");
+		assert.equal(result.content[0].content, "(mcp__custom-tools__empty_tool completed with no output)");
 	});
 
 	it("toolResult with only an image keeps the image", () => {

@@ -67,38 +67,46 @@ export function messageContentToText(
 	return hasText ? parts.join("\n") : "";
 }
 
-// Tool results keep the block array shape the live path sends: every pi tool
-// reaches Claude Code over MCP (toolResultToMcpContent), and CC writes an MCP
-// result's content blocks through as-is. Flattening to a string, which is how
-// CC stores its *native* tools' results, made every rebuilt request diverge from
-// the cached prefix at the first tool result (diag/probe-rebuild-fidelity.mjs).
+// Tool results take the shape the live path gives them: every pi tool reaches
+// Claude Code over MCP, so the blocks are the ones toolResultToMcpContent sends
+// (non-empty text and images; anything else is dropped there too), and CC writes
+// them through as an array. Flattening to a string, which is how CC stores its
+// *native* tools' results, made every rebuilt request diverge from the cached
+// prefix at the first tool result (diag/probe-rebuild-fidelity.mjs).
+//
+// Two shapes CC writes cannot be reproduced from pi's history, so a rebuild still
+// diverges at them: an image result, to which CC appends an `[Image: source: …]`
+// block naming a file in its session directory, and an oversized result, which CC
+// replaces with a `<persisted-output>` preview of a file it saved (issue #156).
 function toolResultContent(
 	content: string | Array<{ type: string; text?: string; data?: string; mimeType?: string }>,
 ): Array<Record<string, unknown>> {
-	if (typeof content === "string" || !Array.isArray(content)) return [{ type: "text", text: messageContentToText(content) || "" }];
+	if (typeof content === "string" || !Array.isArray(content)) {
+		const text = messageContentToText(content);
+		return text ? [{ type: "text", text }] : [];
+	}
 	const blocks: Array<Record<string, unknown>> = [];
 	for (const block of content) {
 		if (block.type === "text" && block.text) blocks.push({ type: "text", text: block.text });
 		else if (block.type === "image" && block.data && block.mimeType) {
 			blocks.push({ type: "image", source: { type: "base64", media_type: block.mimeType, data: block.data } });
-		} else if (block.type !== "text" && block.type !== "image") {
-			// Same marker messageContentToText leaves for unrecognized blocks, so the
-			// text and image paths describe an extension's output the same way.
-			blocks.push({ type: "text", text: `[${block.type}]` });
 		}
 	}
-	return blocks.length ? blocks : [{ type: "text", text: "" }];
+	return blocks;
 }
 
-// A failed MCP call is the one result Claude Code records as a string; a
-// successful one keeps its block array (toolResultContent).
+// A failed MCP call is recorded as a string, and so is an empty result, which CC
+// replaces with a note naming the tool (measured: an MCP tool returning one empty
+// text block); anything else keeps its block array (toolResultContent).
 function toolResultBlock(
 	toolUseId: string,
 	content: string | Array<{ type: string; text?: string; data?: string; mimeType?: string }>,
 	isError: boolean | undefined,
+	toolName: string,
 ): Record<string, unknown> {
 	if (isError) return { type: "tool_result", tool_use_id: toolUseId, content: messageContentToText(content) || "", is_error: true };
-	return { type: "tool_result", tool_use_id: toolUseId, content: toolResultContent(content) };
+	const blocks = toolResultContent(content);
+	return { type: "tool_result", tool_use_id: toolUseId, content: blocks.length ? blocks : `(${toolName} completed with no output)` };
 }
 
 /**
@@ -144,6 +152,8 @@ export function convertPiMessages(
 	// The user message collecting this assistant turn's tool results, if one has
 	// been emitted yet, and the index of the assistant message it belongs to. Both
 	// are cleared at every assistant message — see the toolResult branch.
+	// The name each tool_use went out under, for the note CC writes for an empty result.
+	const toolUseNames = new Map<string, string>();
 	let turnResults: { role: "user"; content: Array<Record<string, unknown>> } | null = null;
 	let turnAssistantIdx: number | null = null;
 
@@ -182,7 +192,9 @@ export function convertPiMessages(
 					}
 				} else if (block.type === "toolCall") {
 					const toolName = mapPiToolNameToSdk(block.name, customToolNameToSdk);
-					blocks.push({ type: "tool_use", id: sanitizeToolId(block.id, sanitizedIds), name: toolName, input: block.arguments ?? {} });
+					const id = sanitizeToolId(block.id, sanitizedIds);
+					toolUseNames.set(id, toolName);
+					blocks.push({ type: "tool_use", id, name: toolName, input: block.arguments ?? {} });
 				} else {
 					dropped.other.set(block.type, (dropped.other.get(block.type) ?? 0) + 1);
 				}
@@ -238,7 +250,9 @@ export function convertPiMessages(
 			// reorderAttachmentsForAPI (claude-code-rip src/utils/messages.ts:1481)
 			// bubbles attachments up to the nearest assistant or tool_result message
 			// and re-inserts them after it. The on-disk form differs, the order does not.
-			const block = toolResultBlock(sanitizeToolId(msg.toolCallId, sanitizedIds), msg.content, msg.isError);
+			const toolUseId = sanitizeToolId(msg.toolCallId, sanitizedIds);
+			const toolName = toolUseNames.get(toolUseId) ?? mapPiToolNameToSdk(String(msg.toolName ?? ""), customToolNameToSdk);
+			const block = toolResultBlock(toolUseId, msg.content, msg.isError, toolName);
 			if (turnResults) {
 				turnResults.content.push(block);
 			} else {
