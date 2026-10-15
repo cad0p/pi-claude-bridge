@@ -3,6 +3,7 @@
 ## UNRELEASED
 
 - **Fix: `/tree` back to an earlier turn keeps the prompt cache** — instead of rebuilding Claude Code's session from pi's history, the bridge forks CC's own session at the turn boundary (`resumeSessionAt` + `forkSession`), so the kept turns are CC's own records and the next request repeats the cached prefix byte for byte. Only when pi's history is a strict prefix of the synced one, ends a completed turn, and CC's session holds exactly the synced prompts, each matching pi's; anything else (branch summaries, mid-turn cuts, steers) still rebuilds, as does a fork whose query fails before CC writes it (carrying attachments from the source session). The abandoned branch's CC session file is left in place. Measured with `diag/probe-tree-fork.mjs`; covered by `tests/unit-tree-fork.mjs`.
+- **Remove: injected bash `timeout: 120`** — the bridge added it to every pi bash call that omitted it, so the argument reached pi's history but not Claude Code's, and every rebuild missed the prompt cache from the first such call. Tool calls now reach pi exactly as the model made them; pi's bash has no default timeout, so a default belongs in pi's bash tool (e.g. `@cad0p/pi-bash-timeout`, which applies one at execution time). Same change as part of #198 (@superninjv).
 
 ## 0.9.3 — 2026-10-13
 
