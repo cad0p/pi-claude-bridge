@@ -11,6 +11,7 @@ All notable changes to this project will be documented in this file.
 ### 🐛 Bug Fixes
 
 - Carry Claude Code's own image and oversized tool results across rebuilds (closes #6)
+- *(package)* Ship CHANGELOG.md so Pi shows Extension Updates (closes #9)
 
 ### 💼 Other
 
